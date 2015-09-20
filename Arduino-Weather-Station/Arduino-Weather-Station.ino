@@ -9,31 +9,41 @@
  * More info about how to connect to wunderground.com can be found 
  * here: http://wiki.wunderground.com/index.php/PWS_-_Upload_Protocol
  * 
- * This code needs reworking to remove defects and make it easier to read.
- * 
+ *
  * Weather Station by George Timmermans
 */
 
+#include <Wire.h>
 #include <SPI.h>
 #include <Ethernet.h>
 #include <DHT.h>
 #include <DHT_U.h>
 #include <Adafruit_Sensor.h>
+#include <Adafruit_BMP085_U.h>
 
-/* Pins used:
+/* Pins used Arduino Uno + Ethernet shield:
  * A0 - Wind Direction
  * D2 - Anemometer
- * D6 - DHT21
+ * D7 - DHT21
  * D10 - Ethernet shield
  * D11 - Ethernet shield
  * D12 - Ethernet shield
  * D13 - Ethernet shield
  */
 
+/* Pins used Teensy 3.1 + Wiznet WIZ820io ethernet module :
+ * A1 - Wind Direction
+ * 14 - Anemometer
+ * D7 - DHT21
+ * D10 - Ethernet shield
+ * D11 - Ethernet shield
+ * D12 - Ethernet shield
+ * D13 - Ethernet shield
+ */
+ 
 // assign a MAC address for the ethernet controller.
 // fill in your address here:
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
-//byte mac[] = {0x00, 0xAA, 0xBB, 0xCC, 0xDE, 0x02 };
 
 // fill in an available IP address on your network here,
 // for manual configuration:
@@ -44,26 +54,29 @@ IPAddress myDns(8,8,8,8);
 EthernetClient client;
 
 // Davis Vantage pro windvane/anemometer
-#define VANEPIN A0
-#define ANEMOISR 2
+#define VANEPIN A1
+#define ANEMOISR 14
 const double WindTo_mph = 2.25;   // Davis = 2.25
 
 // Temperature/Humidity sensor
 #define DHTTYPE DHT21     
-#define DHTPIN  6  // make pin 6
-DHT_Unified dht(DHTPIN, DHTTYPE);
+#define DHTPIN  7
+DHT_Unified dht(DHTPIN, DHTTYPE, 30);
+
+// BMP085 Baromeric Pressure Sensor
+Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10085);
 
 // Wunderground 
 //char server[] = "weatherstation.wunderground.com";
 char server[] = "rtupdate.wunderground.com";
-char ID[] = "";   //your registered station id
-char PASSWORD[] = "";  //your wunderground password
-
+char ID[] = "*******";   //your registered station id
+char PASSWORD[] = "*******";  //your wunderground password
 
 // Status LED
 const int ledPin =  0;      // the number of the LED pin
 int ledState = LOW;             // ledState used to set the LED
 
+//variables
 unsigned long lastConnectionTime = 0;          // last time you connected to the server, in milliseconds
 boolean lastConnected = false;                 // state of the connection last time through the main loop
 const unsigned long postingInterval = 5*1000;  // delay between updates, in milliseconds
@@ -75,16 +88,15 @@ unsigned long updateAverage = 5000;
 unsigned long update2minAverage = 120000;
 unsigned long updateWunderground = 5000;
 
-//variables
 unsigned int winddir; //wind vane
 double DirectionVolt; //wind vane
-double tempf, humidity, dewptf; // Temp/hum sensor
-
+double tempf, humidity, dewptf, indoortempf; // Temp/hum sensor
+double baromin; // barometric pressure
 
 unsigned long PulseTimeNow = 0; // Time stamp (in millisecons) for pulse triggering the interrupt
-float WindSpeed_mps, WindSpeed_cnt,WindSpeed_rpm;
-float WindSpeed_mph = 0.0;
-float WindSpeed_Hz = 0.0;
+double WindSpeed_mps, WindSpeed_cnt,WindSpeed_rpm;
+double WindSpeed_mph = 0.0;
+double WindSpeed_Hz = 0.0;
 volatile unsigned long PulseTimeLast = 0; // Time stamp of the previous pulse
 volatile unsigned long PulseTimeInterval = 0; // Time interval since last pulse
  
@@ -92,26 +104,25 @@ volatile unsigned long PulsesCumulatedTime = 0; // Time Interval since last wind
 volatile unsigned long PulsesNbr = 0;           // Number of pulses since last wind speed computation 
 volatile unsigned long LastPulseTimeInterval = 1000000000;
 volatile unsigned long MinPulseTimeInterval = 1000000000;
-float MaxWind = 0.0; // Max wind speed 
-float WindGust = 0.0;
-
-#define NUM_SAMPLES 10
-int sum = 0;                    // sum of samples taken
-unsigned char sample_count = 0; // current sample number
-
+double MaxWind = 0.0; // Max wind speed 
+double WindGust = 0.0;
 
 //***************************************************************************************************
+
 void setup() {
   pinMode(4, INPUT_PULLUP);
   pinMode(10, INPUT_PULLUP);
   pinMode(ANEMOISR, INPUT);
   pinMode(ledPin, OUTPUT);    
   
-  attachInterrupt(0, AnemometerPulse, FALLING);
+  attachInterrupt(ANEMOISR, AnemometerPulse, FALLING);
   PulseTimeLast = micros();
   
   // start serial port:
   Serial.begin(115200);
+
+  // start barometric pressure sensor
+  bmp.begin();
   
   // give the ethernet module time to boot up:
   delay(1000);
@@ -184,9 +195,13 @@ void loop()  {
 // this method makes a HTTP connection to the server:
 void httpRequest() {
   
-  if (isnan(WindSpeed_mph)) // Quick way to handle the defects hiding in the borrowed anemometer code
+  if (isnan(WindSpeed_mph)) // filter results in case Anemometer is left unplugged.
     WindSpeed_mph = 0;
+  if (WindSpeed_mph > 250) 
+    WindSpeed_mph = 0;  
   if (isnan(WindGust))
+    WindGust = 0; 
+  if (WindGust > 250) 
     WindGust = 0;  
     
   Serial.println("Trying to connect to wunderground");
@@ -200,7 +215,7 @@ void httpRequest() {
     client.print("&PASSWORD=");
     client.print(PASSWORD);
     client.print("&dateutc=now");
-    
+
     client.print("&tempf=");
     client.print(tempf);
     
@@ -210,14 +225,20 @@ void httpRequest() {
     client.print("&dewptf=");
     client.print(dewptf);
 
+    client.print("&indoortempf=");
+    client.print(indoortempf);
+
     client.print("&winddir=");
     client.print(winddir); 
-    
+
     client.print("&windspeedmph=");
     client.print(WindSpeed_mph); 
    
     client.print("&windgustmph=");
     client.print(WindGust); 
+
+    client.print("&baromin=");
+    client.print(baromin); 
     
     client.print("&action=updateraw");
     client.println("&realtime=1&rtfreq=5");
@@ -231,13 +252,8 @@ void httpRequest() {
     
     MinPulseTimeInterval = 1000000000;
     LastPulseTimeInterval = 1000000000;
-    
-    if (client.available()) {
-      char c = client.read();
-      Serial.print(c);
-    }
-  } 
-  else {
+
+  } else {
     // if you couldn't make a connection:
     Serial.println("connection failed");
     Serial.println("disconnecting.");
@@ -249,8 +265,9 @@ void httpRequest() {
 
 void readSensors()  {
   readDHT();
+  readBMP();
   readWindDirection();
-  AnemometerLoop();   // Get Anemometer data 
+  AnemometerLoop();
  
   Serial.println();
 }
@@ -297,6 +314,43 @@ void readDHT()  {
 
 //***************************************************************************************************
 
+void readBMP() {
+  sensors_event_t event;
+  bmp.getEvent(&event);
+ 
+  /* Display the results (barometric pressure is measure in hPa) */
+  if (event.pressure) {
+    baromin = event.pressure;
+    /* Display atmospheric pressue in hPa */
+    Serial.print("Pressure:       ");
+    Serial.print(baromin);
+    Serial.println(" hPa");
+
+    baromin = baromin / 33.8638866667;
+    Serial.print("Pressure:       ");
+    Serial.print(baromin);
+    Serial.println(" inHg");
+    
+    float temperature;
+    bmp.getTemperature(&temperature);
+    Serial.print("indoortempf:    ");
+    Serial.print(temperature);
+    Serial.println(" C");
+    temperature = temperature * 9 / 5 + 32;
+    Serial.print("indoortempf:    ");
+    Serial.print(temperature);
+    Serial.println(" *F");
+    indoortempf = temperature;
+
+  } else  {
+    baromin = -1;
+    indoortempf = -1;
+    Serial.println("Error reading barometric pressure!");
+  }
+}
+
+//***************************************************************************************************
+
 void AnemometerPulse()  {
   noInterrupts();             // disable global interrupts
   PulseTimeNow = micros();   // Micros() is more precise to compute pulse width that millis();
@@ -315,15 +369,17 @@ void AnemometerPulse()  {
 //***************************************************************************************************
 
 void AnemometerLoop ()  {  // START Anemometer section
-  WindSpeed_Hz=1000000.0*PulsesNbr/PulsesCumulatedTime; 
+  noInterrupts();  // precaution using shared resources.
+  WindSpeed_Hz = 1000000.0*PulsesNbr/PulsesCumulatedTime; 
+  MaxWind      = 1000000*WindTo_mph/MinPulseTimeInterval;
+  interrupts();
+  
   WindSpeed_mph=WindSpeed_Hz*WindTo_mph;
   
   Serial.print("Wind speed Hz:     ");  
   Serial.print(WindSpeed_Hz); 
   Serial.println(" hz");  
 
-  MaxWind       = 1000000*WindTo_mph/MinPulseTimeInterval;
-    
   Serial.print("Wind speed:     ");  
   Serial.print(WindSpeed_mph); 
   Serial.println(" mph");  
@@ -366,3 +422,5 @@ double dewPoint(double tempf, double humidity)  {
   double T = log(VP/0.61078);   
   return (241.88 * T) / (17.558-T);
 }
+
+//***************************************************************************************************
