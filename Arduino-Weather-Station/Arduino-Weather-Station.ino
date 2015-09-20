@@ -1,9 +1,17 @@
 /* Weather Station connected to www.wunderground.com
- * Parts used:
+ * Parts used Arduino Version:
  * - Davis Vantage Pro anemometer (wind speed, wind direction)
  * - Arduino Uno
  * - Ethernet Shield
  * - DHT21 temperature and humidity sensor
+ * 
+ * Parts used Teensy 3.1 Version:
+ * - Davis Vantage Pro anemometer (wind speed, wind direction)
+ * - Teensy 3.1
+ * - WIZ820io & Micro SD Card Adaptor
+ * - WIZ820io ethernet module
+ * - DHT21 temperature and humidity sensor
+ * - BMP180 barometric pressure sensor
  * 
  * Some code is based on https://gist.github.com/jaymham/7792782
  * More info about how to connect to wunderground.com can be found 
@@ -11,6 +19,7 @@
  * 
  *
  * Weather Station by George Timmermans
+ * http://www.georgetimmermans.com/weather-station.html
 */
 
 #include <Wire.h>
