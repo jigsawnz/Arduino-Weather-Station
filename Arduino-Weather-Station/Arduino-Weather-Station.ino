@@ -1,3 +1,28 @@
+/*  The MIT License (MIT)
+ *
+ *  Copyright (c) [2015] [George Timmermans]
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy
+ *  of this software and associated documentation files (the "Software"), to deal
+ *  in the Software without restriction, including without limitation the rights
+ *  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *  copies of the Software, and to permit persons to whom the Software is
+ *  furnished to do so, subject to the following conditions:
+ *  
+ *  The above copyright notice and this permission notice shall be included in all
+ *  copies or substantial portions of the Software.
+ *  
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+//********************************************************************
+
 /* Weather Station connected to www.wunderground.com
  * Parts used Arduino Version:
  * - Davis Vantage Pro anemometer (wind speed, wind direction)
@@ -22,6 +47,8 @@
  * http://www.georgetimmermans.com/weather-station.html
 */
 
+//********************************************************************
+
 #include <Wire.h>
 #include <SPI.h>
 #include <Ethernet.h>
@@ -29,6 +56,9 @@
 #include <DHT_U.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP085_U.h>
+//  #include <elapsedMillis.h>  // only required for non teensy boards.
+
+//********************************************************************
 
 /* Pins used Arduino Uno + Ethernet shield:
  * A0 - Wind Direction
@@ -41,15 +71,25 @@
  */
 
 /* Pins used Teensy 3.1 + Wiznet WIZ820io ethernet module :
- * A1 - Wind Direction
- * 14 - Anemometer
- * D7 - DHT21
- * D10 - Ethernet shield
- * D11 - Ethernet shield
- * D12 - Ethernet shield
- * D13 - Ethernet shield
+ *                             -----
+ *                      GND *  |___|  * Vin (3.7 to 5.5 volts)
+ *                        0 *         * AGND
+ *                        1 *         * 3.3V (100 mA max)
+ *                        2 *         * 23-A9
+ *                        3 *         * 22-A8
+ *                        4 *         * 21-A7
+ *                        5 * _______ * 20-A6
+ *                        6 *|       |* 19-A5
+ * DHT21                  7 *|       |* 18-A4
+ *                        8 *|       |* 17-A3
+ *                        9 *|_______|* 16-A2
+ * Ethernet shield        10 *         * 15-A1        Wind Direction
+ * Ethernet shield        11 *   ###   * 14-A0        Anemometer
+ * Ethernet shield        12 * * * * * * 13(led)      Ethernet shield 
  */
- 
+
+//********************************************************************
+
 // assign a MAC address for the ethernet controller.
 // fill in your address here:
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
@@ -77,13 +117,13 @@ Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10085);
 
 // Wunderground 
 //char server[] = "weatherstation.wunderground.com";
-char server[] = "rtupdate.wunderground.com";
-char ID[] = "*******";   //your registered station id
-char PASSWORD[] = "*******";  //your wunderground password
+char server[]   = "rtupdate.wunderground.com";
+char ID[]       = "***********";   //your registered station id
+char PASSWORD[] = "***********";  //your wunderground password
 
 // Status LED
-const int ledPin =  0;      // the number of the LED pin
-int ledState = LOW;             // ledState used to set the LED
+const uint8_t ledPin =  0;      // the number of the LED pin
+bool ledState = LOW;             // ledState used to set the LED
 
 //variables
 unsigned long lastConnectionTime = 0;          // last time you connected to the server, in milliseconds
@@ -115,6 +155,10 @@ volatile unsigned long LastPulseTimeInterval = 1000000000;
 volatile unsigned long MinPulseTimeInterval = 1000000000;
 double MaxWind = 0.0; // Max wind speed 
 double WindGust = 0.0;
+
+elapsedMillis sinceLED;
+elapsedMillis sinceAverage;
+elapsedMillis sinceWunderground;
 
 //***************************************************************************************************
 
@@ -160,20 +204,9 @@ void loop()  {
   if (client.available()) {
     char c = client.read();
     Serial.print(c);
-  }
+  }  
   
-  // if there's no net connection, but there was one last time
-  // through the loop, then stop the client:
-  if (!client.connected() && lastConnected) {
-    Serial.println();
-    Serial.println("disconnecting.");
-    client.stop();
-  }
-  
-  currentMillis = millis();
-  unsigned long timePassed = currentMillis - previousMillis;
-  
-  if(timePassed > updateLED) {
+  if(sinceLED >= updateLED) {
     if (ledState == LOW)
       ledState = HIGH;
     else
@@ -181,28 +214,30 @@ void loop()  {
 
     // set the LED with the ledState of the variable:
     digitalWrite(ledPin, ledState);
+    sinceLED = 0;
   }
   
-  if(timePassed > updateAverage) {
-    previousMillis = currentMillis;   
+  if(sinceAverage >= updateAverage) {
     readSensors();
+    sinceAverage = 0;
   }
 
   // if you're not connected, and one minute have passed since
   // your last connection, then connect again and send data:
-  if(!client.connected() && ( currentMillis - lastConnectionTime > updateWunderground)) {
+  if(sinceWunderground >= updateWunderground) {
     httpRequest();
+    sinceWunderground = 0;
   }
-  
-  // store the state of the connection for next time through
-  // the loop:
-  lastConnected = client.connected();
 }
 
 //***************************************************************************************************
 
 // this method makes a HTTP connection to the server:
 void httpRequest() {
+
+  // close any connection before send a new request.
+  // This will free the socket on the WiFi shield
+  client.stop();
   
   if (isnan(WindSpeed_mph)) // filter results in case Anemometer is left unplugged.
     WindSpeed_mph = 0;
@@ -265,8 +300,6 @@ void httpRequest() {
   } else {
     // if you couldn't make a connection:
     Serial.println("connection failed");
-    Serial.println("disconnecting.");
-    client.stop();
   }
 }
 
@@ -360,7 +393,7 @@ void readBMP() {
 
 //***************************************************************************************************
 
-void AnemometerPulse()  {
+void AnemometerPulse() {
   noInterrupts();             // disable global interrupts
   PulseTimeNow = micros();   // Micros() is more precise to compute pulse width that millis();
   PulseTimeInterval = PulseTimeNow - PulseTimeLast;
@@ -379,11 +412,11 @@ void AnemometerPulse()  {
 
 void AnemometerLoop ()  {  // START Anemometer section
   noInterrupts();  // precaution using shared resources.
-  WindSpeed_Hz = 1000000.0*PulsesNbr/PulsesCumulatedTime; 
-  MaxWind      = 1000000*WindTo_mph/MinPulseTimeInterval;
+  WindSpeed_Hz = 1000000.0 * PulsesNbr  / PulsesCumulatedTime; 
+  MaxWind      = 1000000.0 * WindTo_mph / MinPulseTimeInterval;
   interrupts();
   
-  WindSpeed_mph=WindSpeed_Hz*WindTo_mph;
+  WindSpeed_mph = WindSpeed_Hz * WindTo_mph;
   
   Serial.print("Wind speed Hz:     ");  
   Serial.print(WindSpeed_Hz); 
@@ -406,13 +439,15 @@ void AnemometerLoop ()  {  // START Anemometer section
 //***************************************************************************************************
 
 void readWindDirection()  {
-  DirectionVolt = analogRead (VANEPIN);
+  DirectionVolt = analogRead(VANEPIN);
   winddir = (DirectionVolt / 1024.0) * 360.0; 
          
   if (winddir > 360 ) { 
-    winddir = winddir - 360; }
-  if (winddir < 0 ) 
-    { winddir = winddir + 360; } 
+    winddir = winddir - 360; 
+  }
+  if (winddir < 0 ) { 
+    winddir = winddir + 360; 
+  } 
   Serial.print("Wind direction: ");  
   Serial.print(winddir); 
   Serial.println(" degrees");  
@@ -421,15 +456,15 @@ void readWindDirection()  {
 //***************************************************************************************************
 
 double dewPoint(double tempf, double humidity)  {
-  double A0 = 373.15/(273.15 + tempf);
-  double SUM = -7.90298 * (A0-1);
+  double A0 = 373.15 / (273.15 + tempf);
+  double SUM = -7.90298 * (A0 - 1);
   SUM += 5.02808 * log10(A0);
-  SUM += -1.3816e-7 * (pow(10, (11.344*(1-1/A0)))-1) ;
-  SUM += 8.1328e-3 * (pow(10,(-3.49149*(A0-1)))-1) ;
+  SUM += -1.3816e-7 * (pow(10, (11.344 * (1 - 1 / A0))) -1) ;
+  SUM += 8.1328e-3 * (pow(10,(-3.49149 * (A0 - 1))) -1) ;
   SUM += log10(1013.246);
-  double VP = pow(10, SUM-3) * humidity;
-  double T = log(VP/0.61078);   
-  return (241.88 * T) / (17.558-T);
+  double VP = pow(10, SUM -3) * humidity;
+  double T = log(VP / 0.61078);   
+  return (241.88 * T) / (17.558 - T);
 }
 
 //***************************************************************************************************
